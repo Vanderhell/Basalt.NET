@@ -41,7 +41,30 @@ jobs:
       - name: Build WPF .NET Framework 4.7.2 consumer
         run: dotnet build consumer-wpf/ConsumerWpf.csproj -c Release
 
+      - name: Pack NuGet packages
+        run: |
+          dotnet pack BasaltCore/BasaltCore.csproj -c Release --no-build -p:PackageVersion=1.1.0 --output artifacts/packages
+          dotnet pack BasaltCore.SqlServer/BasaltCore.SqlServer.csproj -c Release --no-build -p:PackageVersion=1.1.0 --output artifacts/packages
+
+      - name: Validate NuGet packages
+        shell: pwsh
+        run: |
+          $packages = @(
+            "artifacts/packages/Basalt.1.1.0.nupkg",
+            "artifacts/packages/Basalt.SqlServer.1.1.0.nupkg"
+          )
+          foreach ($package in $packages) {
+            if (-not (Test-Path $package)) { throw "Missing NuGet package: $package" }
+            if ((Get-Item $package).Length -le 0) { throw "Empty NuGet package: $package" }
+            $destination = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileNameWithoutExtension($package))
+            Expand-Archive -LiteralPath $package -DestinationPath $destination -Force
+            if (-not (Get-ChildItem $destination -Filter *.nuspec -Recurse)) { throw "Invalid NuGet package: $package" }
+          }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          files: |
+            artifacts/packages/Basalt.1.1.0.nupkg
+            artifacts/packages/Basalt.SqlServer.1.1.0.nupkg

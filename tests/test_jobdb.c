@@ -7,9 +7,41 @@
 #include <direct.h>
 #include <process.h>
 #include <io.h>
+#include <windows.h>
 #define unlink _unlink
 #else
 #include <unistd.h>
+#endif
+
+#ifdef _WIN32
+static int wait_child_with_timeout(intptr_t child, const char *label) {
+    const DWORD timeout_ms = 30000;
+    DWORD result = WaitForSingleObject((HANDLE)child, timeout_ms);
+    DWORD exit_code = 1;
+    if (result == WAIT_TIMEOUT) {
+        fprintf(stderr, "BasaltDB_tests: child %s timed out after %lu ms; terminating it\n", label, (unsigned long)timeout_ms);
+        TerminateProcess((HANDLE)child, 1);
+        WaitForSingleObject((HANDLE)child, 5000);
+        CloseHandle((HANDLE)child);
+        return -1;
+    }
+    if (result == WAIT_FAILED) {
+        fprintf(stderr, "BasaltDB_tests: waiting for child %s failed (error %lu)\n", label, (unsigned long)GetLastError());
+        CloseHandle((HANDLE)child);
+        return -1;
+    }
+    if (!GetExitCodeProcess((HANDLE)child, &exit_code)) {
+        fprintf(stderr, "BasaltDB_tests: reading exit code for child %s failed (error %lu)\n", label, (unsigned long)GetLastError());
+        CloseHandle((HANDLE)child);
+        return -1;
+    }
+    CloseHandle((HANDLE)child);
+    if (exit_code != 0) {
+        fprintf(stderr, "BasaltDB_tests: child %s exited with status %lu\n", label, (unsigned long)exit_code);
+        return -1;
+    }
+    return 0;
+}
 #endif
 static void rmdb(void) {
 #ifdef _WIN32
@@ -83,9 +115,9 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc > 2 && strcmp(argv[1], "writer-child") == 0) {
-        jobdb_tx_t *tx = NULL; unsigned long id = strtoul(argv[2], NULL, 10); unsigned char value = (unsigned char)id;
+        jobdb_tx_t *tx = NULL; unsigned long id = strtoul(argv[2], NULL, 10); unsigned char value = (unsigned char)id; unsigned retries = 0;
         assert(jobdb_open("jobdb-test", &d) == JOBDB_OK);
-        assert(jobdb_tx_begin(d, &tx) == JOBDB_OK); assert(jobdb_tx_put(tx, 8, 1000 + id, &value, 1) == JOBDB_OK); { jobdb_result_t cr; do { cr=jobdb_tx_commit(tx); if(cr==JOBDB_ERR_TIMEOUT||cr==JOBDB_ERR_BUSY) { jobdb_tx_rollback(tx); tx=NULL; Sleep(20); assert(jobdb_tx_begin(d,&tx)==JOBDB_OK); assert(jobdb_tx_put(tx,8,1000+id,&value,1)==JOBDB_OK); } } while(cr==JOBDB_ERR_TIMEOUT||cr==JOBDB_ERR_BUSY); assert(cr==JOBDB_OK); } jobdb_tx_rollback(tx);
+        assert(jobdb_tx_begin(d, &tx) == JOBDB_OK); assert(jobdb_tx_put(tx, 8, 1000 + id, &value, 1) == JOBDB_OK); { jobdb_result_t cr; do { cr=jobdb_tx_commit(tx); if(cr==JOBDB_ERR_TIMEOUT||cr==JOBDB_ERR_BUSY) { jobdb_tx_rollback(tx); tx=NULL; if (++retries >= 200) { fprintf(stderr, "BasaltDB_tests: writer child %lu exhausted commit retries\n", id); jobdb_close(d); return 1; } Sleep(20); assert(jobdb_tx_begin(d,&tx)==JOBDB_OK); assert(jobdb_tx_put(tx,8,1000+id,&value,1)==JOBDB_OK); } } while(cr==JOBDB_ERR_TIMEOUT||cr==JOBDB_ERR_BUSY); assert(cr==JOBDB_OK); } jobdb_tx_rollback(tx);
         jobdb_close(d); return 0;
     }
     if (argc > 1 && strcmp(argv[1], "reader-child") == 0) {
@@ -108,7 +140,7 @@ int main(int argc, char **argv) {
      if (getenv("JOBDB_SKIP_MP") == NULL) { intptr_t children[13]; char id_text[10][16]; char *args[4]; args[0]=argv[0]; args[3]=NULL;
        args[1]="reader-child"; args[2]=NULL; for(unsigned i=0;i<3;i++){children[i]=_spawnv(_P_NOWAIT,argv[0],(const char * const*)args);assert(children[i]!=-1);}
        args[1]="writer-child"; for(unsigned i=0;i<10;i++){sprintf(id_text[i],"%u",i+1);args[2]=id_text[i];children[i+3]=_spawnv(_P_NOWAIT,argv[0],(const char * const*)args);assert(children[i+3]!=-1);}
-       for(unsigned i=0;i<13;i++){int status=0;assert(_cwait(&status,children[i],0)!=-1);assert(status==0);}
+       for(unsigned i=0;i<13;i++){char label[32];sprintf(label,"jobdb-test child %u",i);if(wait_child_with_timeout(children[i],label)!=0)return 1;}
        { size_t found=0;uint64_t ids[16];assert(jobdb_list_record_ids(d,8,ids,16,&found)==JOBDB_OK&&found==10); }
      }
 #endif
